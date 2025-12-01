@@ -256,7 +256,7 @@ void RPF7Archive::ReadNames()
         m_FileStream.seekg(oldPosition, std::ios::beg);
 }
 
-void RPF7Archive::PrintEntryTree(EntryNode<RPF7Entry>* parent, uint16_t&& level = 0)
+void RPF7Archive::PrintEntryTree(EntryNode<RPF7Entry>* parent, uint16_t&& level)
 {
     if (parent == nullptr)
         return;

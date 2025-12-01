@@ -13,5 +13,5 @@ file(
         ${PROJECT_SOURCE_DIR}/src/*.cpp
 )
 add_library(${PROJECT_NAME} STATIC ${RPFLIB_FILES})
-target_include_directories(${PROJECT_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/include)
+target_include_directories(${PROJECT_NAME} PUBLIC ${PROJECT_SOURCE_DIR}/include)
 target_link_libraries(${PROJECT_NAME} PUBLIC zlib)
