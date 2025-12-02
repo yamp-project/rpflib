@@ -425,10 +425,10 @@ void RPF7Archive::WriteEntriesData()
             if (needToCompress)
                 fileData = CompressData(fileData.data(), fileData.size());
 
-            //if (!currentChild->m_Entry->m_IsResource && needToCompress)
-            currentChild->m_Entry->m_EntrySize = fileData.size();
-            //else
-                //currentChild->m_Entry->m_EntrySize = 0;
+            if (currentChild->m_Entry->m_IsResource || needToCompress)
+                currentChild->m_Entry->m_EntrySize = fileData.size();
+            else
+                currentChild->m_Entry->m_EntrySize = 0;
 
             currentChild->m_Entry->m_EntryOffset = (((uint64_t)m_FileStream.tellp()) / RPF7Entry::BLOCK_SIZE);
 
