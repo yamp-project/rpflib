@@ -425,10 +425,10 @@ void RPF7Archive::WriteEntriesData()
             if (needToCompress)
                 fileData = CompressData(fileData.data(), fileData.size());
 
-            if (!currentChild->m_Entry->m_IsResource && needToCompress)
-                currentChild->m_Entry->m_EntrySize = fileData.size();
-            else
-                currentChild->m_Entry->m_EntrySize = 0;
+            //if (!currentChild->m_Entry->m_IsResource && needToCompress)
+            currentChild->m_Entry->m_EntrySize = fileData.size();
+            //else
+                //currentChild->m_Entry->m_EntrySize = 0;
 
             currentChild->m_Entry->m_EntryOffset = (((uint64_t)m_FileStream.tellp()) / RPF7Entry::BLOCK_SIZE);
 
@@ -499,10 +499,8 @@ bool RPF7Archive::IsFileAResource(const std::filesystem::path &path, uint32_t& v
     if (!resourceStream.is_open())
         return false;
 
-    uint32_t magic;
-    uint32_t flags;
-    //uint32_t virtualFlags;
-    //uint32_t physicalFlags;
+    uint32_t magic = 0;
+    uint32_t flags = 0;
 
     resourceStream.read(reinterpret_cast<char*>(&magic), sizeof(uint32_t));
     resourceStream.read(reinterpret_cast<char*>(&flags), sizeof(uint32_t));
@@ -510,7 +508,7 @@ bool RPF7Archive::IsFileAResource(const std::filesystem::path &path, uint32_t& v
     resourceStream.read(reinterpret_cast<char*>(&physicalFlags), sizeof(uint32_t));
     resourceStream.close();
 
-    return (magic == RPF7Archive::RESOURCE_IDENT);
+    return magic == RPF7Archive::RESOURCE_IDENT;
 }
 
 uint64_t RPF7Archive::GetEntryNodeTotalCount()
