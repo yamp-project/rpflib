@@ -667,52 +667,58 @@ std::vector<RPF7Entry> RPF7Archive::BuildEntriesListFromNodeTree()
     std::vector<RPF7Entry> entryList;
     entryList.reserve(GetEntryNodeTotalCount());
 
-    std::function<void(const EntryNode<RPF7Entry>*, uint32_t&&)> recursiveBuild = [&](const EntryNode<RPF7Entry>* parent, uint32_t&& idx = 1)
+    std::function<void(EntryNode<RPF7Entry>*, uint32_t&&)> recursiveBuild = 
+        [&](EntryNode<RPF7Entry>* parent, uint32_t&& idx = 1)
     {
         if (parent == nullptr)
             return;
 
-        //building the file infos (mostly)
+        // Collect and sort children by name
+        std::vector<EntryNode<RPF7Entry>*> sortedChildren;
         EntryNode<RPF7Entry>* currentChild = parent->m_FirstChild;
         while (currentChild != nullptr)
         {
-            RPF7Entry* newEntry = &entryList.emplace_back();
-            currentChild->m_Entry = newEntry;
-
-            bool isFile = currentChild->m_Name.find(".") != std::string::npos;
-            bool isDirectory = !isFile;
-
-            *newEntry = isFile ? CreateFileEntry(currentChild->m_FilePath) : CreateDirectoryEntry();
-            newEntry->m_NameOffset = GetEntryNameOffset(currentChild->m_Name);
-
-            if (isFile)
-                m_EntryMap[currentChild->m_RelativePath.string()] = newEntry;
-
+            sortedChildren.push_back(currentChild);
             currentChild = currentChild->m_NextSibling;
         }
+        
+        std::sort(sortedChildren.begin(), sortedChildren.end(),
+            [](const EntryNode<RPF7Entry>* a, const EntryNode<RPF7Entry>* b) {
+                return a->m_Name < b->m_Name;
+            });
 
-        //building the directories index and entries count
-        currentChild = parent->m_FirstChild;
-        idx += parent->GetChildrenCount();
-
-        while (currentChild != nullptr)
+        // Build entries for sorted children
+        for (auto* child : sortedChildren)
         {
-            if (currentChild->m_FirstChild != nullptr)
+            RPF7Entry* newEntry = &entryList.emplace_back();
+            child->m_Entry = newEntry;
+
+            bool isFile = child->m_Name. find(".") != std::string::npos;
+            *newEntry = isFile ? CreateFileEntry(child->m_FilePath) : CreateDirectoryEntry();
+            newEntry->m_NameOffset = GetEntryNameOffset(child->m_Name);
+
+            if (isFile)
+                m_EntryMap[child->m_RelativePath.string()] = newEntry;
+        }
+
+        // Process directory indices
+        idx += sortedChildren.size();
+        for (auto* child : sortedChildren)
+        {
+            if (child->m_FirstChild != nullptr)
             {
-                currentChild->m_Entry->m_DirectoryEntry.m_EntriesCount = currentChild->GetChildrenCount();
-                currentChild->m_Entry->m_DirectoryEntry.m_EntriesIndex = idx;
-
-                recursiveBuild(currentChild, std::move(idx));
+                child->m_Entry->m_DirectoryEntry.m_EntriesCount = child->GetChildrenCount();
+                child->m_Entry->m_DirectoryEntry.m_EntriesIndex = idx;
+                recursiveBuild(child, std::move(idx));
             }
-
-            currentChild = currentChild->m_NextSibling;
         }
     };
 
-    RPF7Entry* rootEntry = &entryList.emplace_back();
+    // Root entry
+    RPF7Entry* rootEntry = &entryList. emplace_back();
     *rootEntry = CreateDirectoryEntry();
     rootEntry->m_DirectoryEntry.m_EntriesIndex = 1;
-    rootEntry->m_DirectoryEntry.m_EntriesCount = m_RootNode.GetChildrenCount();
+    rootEntry->m_DirectoryEntry. m_EntriesCount = m_RootNode.GetChildrenCount();
 
     recursiveBuild(&m_RootNode, 1);
 
@@ -726,32 +732,41 @@ std::map<uint32_t, std::string> RPF7Archive::BuildEntriesNameMap()
 
     std::function<void(EntryNode<RPF7Entry>*)> recursiveBuild = [&](EntryNode<RPF7Entry>* parent)
     {
+        std::vector<EntryNode<RPF7Entry>*> sortedChildren;
         EntryNode<RPF7Entry>* currentChild = parent->m_FirstChild;
         while (currentChild != nullptr)
         {
-            if (!entryNameMap.contains(currentChild->m_Name))
-                entryNameMap[currentChild->m_Name] = 0;
-
-            if (currentChild->m_FirstChild != nullptr)
-            {
-                recursiveBuild(currentChild);
-            }
-
+            sortedChildren.push_back(currentChild);
             currentChild = currentChild->m_NextSibling;
+        }
+        
+        std::sort(sortedChildren.begin(), sortedChildren.end(), 
+            [](const EntryNode<RPF7Entry>* a, const EntryNode<RPF7Entry>* b) {
+                return a->m_Name < b->m_Name;
+            });
+
+        for (auto* child : sortedChildren)
+        {
+            if (! entryNameMap.contains(child->m_Name))
+                entryNameMap[child->m_Name] = 0;
+
+            if (child->m_FirstChild != nullptr)
+            {
+                recursiveBuild(child);
+            }
         }
     };
     recursiveBuild(&m_RootNode);
 
-    int idx = 0;
+    uint32_t idx = 0;
+    std::map<uint32_t, std::string> reverseEntryNameMap;
+    
     for (auto& entry : entryNameMap)
     {
         entry.second = idx;
+        reverseEntryNameMap[idx] = entry.first;
         idx += entry.first.size() + 1;
     }
-
-    std::map<uint32_t, std::string> reverseEntryNameMap;
-    for (auto& entry : entryNameMap)
-        reverseEntryNameMap[entry.second] = entry.first;
 
     return reverseEntryNameMap;
 }
