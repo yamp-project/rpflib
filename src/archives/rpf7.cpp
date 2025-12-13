@@ -1,15 +1,20 @@
 #include <functional>
 #include <rpflib/archives/rpf7.h>
-
 #include <zlib.h>
-
 #include <queue>
 
 using namespace rpflib;
 
-RPF7Archive::RPF7Archive(const std::filesystem::path& archivePath, OpenMode openMode)
-    : IRPFArchive(archivePath, openMode)
+RPF7Archive::RPF7Archive(const std::filesystem::path& archivePath, OpenMode openMode, int nameShift) : IRPFArchive(archivePath, openMode), m_NameShift(nameShift)
 {
+    if (m_NameShift < 0 || m_NameShift > 3)
+    {
+        printf("WARNING: nameShift %d out of range [0-3], clamping to valid range\n", m_NameShift);
+        m_NameShift = std::clamp(m_NameShift, 0, 3);
+    }
+
+    m_NameHeapMaxSize = 65536 << m_NameShift;
+
     if (IsReading())
         OpenArchive();
 
@@ -22,7 +27,6 @@ RPF7Archive::~RPF7Archive()
     if (m_FileStream.is_open())
         m_FileStream.close();
 }
-
 
 void RPF7Archive::OpenArchive()
 {
@@ -51,6 +55,9 @@ void RPF7Archive::OpenArchive()
         return;
     }
 
+    m_NameShift = (m_Header.m_NameSize >> 28) & 0x3;
+    m_NameHeapMaxSize = 65536 << m_NameShift;
+
     ReadNames();
     ReadEntries();
 }
@@ -67,7 +74,8 @@ void RPF7Archive::CreateArchive()
     if (!m_FileStream.is_open())
         return;
 
-
+    m_Header = {};
+    m_Header.m_NameSize = 0;
 }
 
 void RPF7Archive::CloseArchive()
@@ -167,16 +175,12 @@ IRPFArchive::EntryPathList RPF7Archive::GetEntryList()
     if (m_EntryMap.empty())
         return pathList;
 
-    std::transform(m_EntryMap.begin(), m_EntryMap.end(), std::back_inserter(pathList),
-        [](const std::pair<std::string, const RPF7Entry*>& pair)
-        {
-            return pair.first;
-        });
+    std::transform(m_EntryMap.begin(), m_EntryMap.end(), std::back_inserter(pathList), [](const std::pair<std::string, const RPF7Entry*>& pair) { return pair.first; });
 
     return pathList;
 }
 
-bool RPF7Archive::SaveEntryToPath(const std::string &entryPath, const std::filesystem::path &outputPath)
+bool RPF7Archive::SaveEntryToPath(const std::string& entryPath, const std::filesystem::path& outputPath)
 {
     if (!IsReading())
         return false;
@@ -200,7 +204,7 @@ bool RPF7Archive::SaveEntryToPath(const std::string &entryPath, const std::files
     return true;
 }
 
-bool RPF7Archive::DoesEntryExists(const std::string &entryPath)
+bool RPF7Archive::DoesEntryExists(const std::string& entryPath)
 {
     if (m_EntryMap.empty())
         return false;
@@ -236,19 +240,24 @@ void RPF7Archive::ReadNames()
     uint32_t namePosition = sizeof(RPF7Header) + (sizeof(RPF7Entry) * m_Header.m_EntryCount);
     m_FileStream.seekg(namePosition, std::ios::beg);
 
-    std::vector<uint8_t> nameBuffer(m_Header.m_NameSize);
+    uint32_t actualNameSize = m_Header.m_NameSize & 0x0FFFFFFF;
+    std::vector<uint8_t> nameBuffer(actualNameSize);
     m_FileStream.read(reinterpret_cast<char*>(nameBuffer.data()), nameBuffer.size());
 
+    uint32_t nameMask = (1 << m_NameShift) - 1;
+
     uint32_t startPosition = 0;
-    for (int i = 0; i < m_Header.m_NameSize; i++)
+    for (uint32_t i = 0; i < actualNameSize; i++)
     {
         uint8_t c = nameBuffer[i];
         if (c == '\0')
         {
             std::string entryName(nameBuffer.data() + startPosition, nameBuffer.data() + i);
-            m_NameMap[startPosition] = entryName;
 
-            startPosition = i + 1;
+            uint32_t alignedOffset = startPosition >> m_NameShift;
+            m_NameMap[alignedOffset] = entryName;
+
+            startPosition = ((i + 1 + nameMask) & ~nameMask);
         }
     }
 
@@ -264,7 +273,6 @@ void RPF7Archive::PrintEntryTree(EntryNode<RPF7Entry>* parent, uint16_t&& level)
     EntryNode<RPF7Entry>* currentChild = parent->m_FirstChild;
     while (currentChild != nullptr)
     {
-        printf("%s%s | %d | %d\n", std::string(level * 2, ' ').c_str(), currentChild->m_Name.c_str(), currentChild->m_FirstChild != nullptr, currentChild->m_Entry->IsDirectory());
         if (currentChild->m_FirstChild != nullptr)
         {
             PrintEntryTree(currentChild, level + 1);
@@ -285,7 +293,6 @@ void RPF7Archive::ReadEntries()
     auto oldPosition = m_FileStream.tellg();
     m_FileStream.seekg(sizeof(RPF7Header), std::ios::beg);
 
-    //auto currentParent = &m_RootNode;
     m_Entries.resize(m_Header.m_EntryCount);
     m_FileStream.read(reinterpret_cast<char*>(m_Entries.data()), sizeof(RPF7Entry) * m_Entries.size());
 
@@ -297,9 +304,6 @@ void RPF7Archive::ReadEntries()
     }
 
     m_RootNode.m_Entry = &rootEntry;
-    //BuildEntryMap(rootEntry);
-    //BuildNodeTree(rootEntry, &m_RootNode);
-
     BuildEntryMapAndNodeTree(rootEntry, &m_RootNode);
 
     if (oldPosition > m_FileStream.tellg())
@@ -317,7 +321,6 @@ void RPF7Archive::WriteHeader()
     m_Header.m_Magic.m_Number = RPF7Archive::IDENT;
     m_Header.m_Encryption = ENCRYPTION_OPEN;
     m_Header.m_EntryCount = GetEntryNodeTotalCount();
-    m_Header.m_NameSize = m_Header.m_NameSize ? m_Header.m_NameSize : 0;
 
     auto oldPosition = m_FileStream.tellp();
     m_FileStream.seekg(0, std::ios::beg);
@@ -344,7 +347,6 @@ void RPF7Archive::WriteEntries()
     if (m_Entries.empty())
         m_Entries = BuildEntriesListFromNodeTree();
 
-    //m_Entries.resize(m_Header.m_EntryCount);
     m_FileStream.write(reinterpret_cast<char*>(m_Entries.data()), sizeof(RPF7Entry) * m_Entries.size());
 
     if (oldPosition > m_FileStream.tellp())
@@ -363,24 +365,42 @@ void RPF7Archive::WriteNames()
     m_FileStream.seekg(sizeof(RPF7Header) + m_Header.m_EntryCount * sizeof(RPF7Entry), std::ios::beg);
 
     auto currentPosition = m_FileStream.tellp();
+    uint32_t nameMask = (1 << m_NameShift) - 1;
+
     for (auto& name : m_NameMap)
     {
+        uint64_t currentOffset = (uint64_t)m_FileStream.tellp() - currentPosition;
+        uint32_t expectedShiftedOffset = name.first;
+        uint32_t expectedActualOffset = expectedShiftedOffset << m_NameShift;
+
+        if (currentOffset != expectedActualOffset)
+        {
+            printf("WARNING: Name offset mismatch! Expected %u, got %llu for name '%s'\n", expectedActualOffset, currentOffset, name.second.c_str());
+        }
+
         m_FileStream.write(name.second.c_str(), name.second.size());
         uint8_t zero = 0;
         m_FileStream.write(reinterpret_cast<char*>(&zero), sizeof(uint8_t));
+
+        uint32_t nameLen = name.second.size() + 1;
+        uint32_t paddedLen = (nameLen + nameMask) & ~nameMask;
+        for (uint32_t i = nameLen; i < paddedLen; i++)
+        {
+            m_FileStream.write(reinterpret_cast<char*>(&zero), sizeof(uint8_t));
+        }
     }
 
     uint64_t writtenBytes = ((uint64_t)(m_FileStream.tellp() - currentPosition));
     uint64_t paddedBytes = GetEntryNameBlockSize(writtenBytes);
 
-    for (int i = 0; i < paddedBytes - writtenBytes; i++)
+    for (uint64_t i = writtenBytes; i < paddedBytes; i++)
     {
         uint8_t zero = 0;
         m_FileStream.write(reinterpret_cast<char*>(&zero), sizeof(uint8_t));
     }
 
-    m_Header.m_NameSize = paddedBytes;
-    WriteHeader(); //rewrite the header because of the name size
+    m_Header.m_NameSize = paddedBytes | (m_NameShift << 28);
+    WriteHeader();
 
     if (oldPosition > m_FileStream.tellp())
         m_FileStream.seekp(oldPosition, std::ios::beg);
@@ -394,12 +414,7 @@ void RPF7Archive::WriteEntriesData()
     if (!m_FileStream.is_open())
         return;
 
-    //there are some extensions that is not compressed at all
-    std::vector<std::string> compressionExtensionExclude = {
-        ".rpf",
-        ".bik",
-        ".awc"
-    };
+    std::vector<std::string> compressionExtensionExclude = {".rpf", ".bik", ".awc"};
 
     uint64_t currentPosition = m_FileStream.tellp();
     m_FileStream.seekp(GetEntryDataBlockSize(currentPosition), std::ios::beg);
@@ -417,7 +432,8 @@ void RPF7Archive::WriteEntriesData()
             if (!currentChild->m_RelativePath.has_extension())
                 continue;
 
-            bool needToCompress = std::find(compressionExtensionExclude.begin(), compressionExtensionExclude.end(), currentChild->m_RelativePath.extension().string()) == compressionExtensionExclude.end();
+            bool needToCompress =
+                std::find(compressionExtensionExclude.begin(), compressionExtensionExclude.end(), currentChild->m_RelativePath.extension().string()) == compressionExtensionExclude.end();
             needToCompress = needToCompress && !currentChild->m_Entry->m_IsResource;
 
             auto fileData = GetFileData(currentChild->m_FilePath);
@@ -432,9 +448,9 @@ void RPF7Archive::WriteEntriesData()
 
             currentChild->m_Entry->m_EntryOffset = (((uint64_t)m_FileStream.tellp()) / RPF7Entry::BLOCK_SIZE);
 
-            //write file data then fill up the gaps
+            // write file data then fill up the gaps
             m_FileStream.write(reinterpret_cast<char*>(fileData.data()), fileData.size());
-            for (int i = 0; i < (GetEntryDataBlockSize(fileData.size()) - fileData.size()); i++)
+            for (uint64_t i = 0; i < (GetEntryDataBlockSize(fileData.size()) - fileData.size()); i++)
             {
                 uint8_t zero = 0;
                 m_FileStream.write(reinterpret_cast<char*>(&zero), sizeof(uint8_t));
@@ -443,14 +459,12 @@ void RPF7Archive::WriteEntriesData()
     };
     recurseEntryWrite(&m_RootNode);
 
-    //rewrite entries part
     WriteEntries();
 }
 
-
 RPF7Entry RPF7Archive::CreateDirectoryEntry()
 {
-    RPF7Entry newEntry {};
+    RPF7Entry newEntry{};
     newEntry.m_EntrySize = 0;
     newEntry.m_EntryOffset = RPF7Entry::DIR_OFFSET;
     newEntry.m_IsResource = 0;
@@ -464,7 +478,7 @@ RPF7Entry RPF7Archive::CreateDirectoryEntry()
 
 RPF7Entry RPF7Archive::CreateFileEntry(const std::filesystem::path& path)
 {
-    RPF7Entry newEntry {};
+    RPF7Entry newEntry{};
     newEntry.m_EntrySize = 0;
     newEntry.m_EntryOffset = 0;
     newEntry.m_NameOffset = 0;
@@ -490,7 +504,7 @@ RPF7Entry RPF7Archive::CreateFileEntry(const std::filesystem::path& path)
     return newEntry;
 }
 
-bool RPF7Archive::IsFileAResource(const std::filesystem::path &path, uint32_t& virtualFlags, uint32_t& physicalFlags)
+bool RPF7Archive::IsFileAResource(const std::filesystem::path& path, uint32_t& virtualFlags, uint32_t& physicalFlags)
 {
     if (!std::filesystem::exists(path))
         return false;
@@ -528,9 +542,8 @@ uint64_t RPF7Archive::GetEntryNodeTotalCount()
         return count;
     };
 
-    return recursiveNodeCount(&m_RootNode, 1); //we start from 1 because root node counts as one already
+    return recursiveNodeCount(&m_RootNode, 1); // we start from 1 because root node counts as one already
 }
-
 
 std::string RPF7Archive::GetEntryName(uint32_t index)
 {
@@ -548,7 +561,7 @@ std::string RPF7Archive::GetEntryName(const RPF7Entry& entry)
     return GetEntryName(entry.m_NameOffset);
 }
 
-uint32_t RPF7Archive::GetEntryNameOffset(const std::string &entryName)
+uint32_t RPF7Archive::GetEntryNameOffset(const std::string& entryName)
 {
     if (m_NameMap.empty())
         return 0;
@@ -560,68 +573,7 @@ uint32_t RPF7Archive::GetEntryNameOffset(const std::string &entryName)
     return 0;
 }
 
-// void RPF7Archive::BuildNodeTree(const RPF7Entry& parentEntry, EntryNode<RPF7Entry>* parentNode)
-// {
-//     if (m_Entries.empty())
-//         return;
-//
-//     if (!parentEntry.IsDirectory())
-//         return;
-//
-//     for (int i = 0; i < parentEntry.m_DirectoryEntry.m_EntriesCount; i++)
-//     {
-//         uint32_t entryArrayIdx = parentEntry.m_DirectoryEntry.m_EntriesIndex + i;
-//         const RPF7Entry& childEntry = m_Entries[entryArrayIdx];
-//
-//         std::string entryName = GetEntryName(childEntry);
-//         EntryNode<RPF7Entry>* addedEntry = nullptr;
-//         if (parentNode && (parentNode->Find(entryName) == nullptr))
-//         {
-//             addedEntry = parentNode->Add(entryName);
-//             addedEntry->m_Entry = const_cast<RPF7Entry*>(&childEntry);
-//         }
-//
-//         if (childEntry.IsDirectory())
-//         {
-//             BuildNodeTree(childEntry, addedEntry);
-//         }
-//     }
-// }
-//
-// void RPF7Archive::BuildEntryMap(const RPF7Entry& parentEntry, std::vector<std::string>&& pathStack)
-// {
-//     if (m_Entries.empty())
-//         return;
-//
-//     if (!parentEntry.IsDirectory())
-//         return;
-//
-//     std::string parentName = GetEntryName(parentEntry);
-//     pathStack.push_back(parentName);
-//
-//     for (int i = 0; i < parentEntry.m_DirectoryEntry.m_EntriesCount; i++)
-//     {
-//         uint32_t entryArrayIdx = parentEntry.m_DirectoryEntry.m_EntriesIndex + i;
-//         const RPF7Entry& childEntry = m_Entries[entryArrayIdx];
-//
-//         std::string entryName = GetEntryName(childEntry);
-//         std::ostringstream parentPath;
-//         std::copy(pathStack.begin(), pathStack.end(), std::ostream_iterator<std::string>(parentPath, "/"));
-//         std::filesystem::path fullPath((parentPath.str() + entryName));
-//
-//         if (fullPath.has_extension())
-//             m_EntryMap[fullPath.string()] = &childEntry;
-//
-//         if (childEntry.IsDirectory())
-//         {
-//             BuildEntryMap(childEntry, std::move(pathStack));
-//         }
-//     }
-//
-//     pathStack.pop_back();
-// }
-
-void RPF7Archive::BuildEntryMapAndNodeTree(const RPF7Entry& parentEntry, EntryNode<RPF7Entry>* parentNode, std::vector<std::string> &&pathStack)
+void RPF7Archive::BuildEntryMapAndNodeTree(const RPF7Entry& parentEntry, EntryNode<RPF7Entry>* parentNode, std::vector<std::string>&& pathStack)
 {
     if (m_Entries.empty())
         return;
@@ -667,13 +619,11 @@ std::vector<RPF7Entry> RPF7Archive::BuildEntriesListFromNodeTree()
     std::vector<RPF7Entry> entryList;
     entryList.reserve(GetEntryNodeTotalCount());
 
-    std::function<void(EntryNode<RPF7Entry>*, uint32_t&&)> recursiveBuild = 
-        [&](EntryNode<RPF7Entry>* parent, uint32_t&& idx = 1)
+    std::function<void(EntryNode<RPF7Entry>*, uint32_t&&)> recursiveBuild = [&](EntryNode<RPF7Entry>* parent, uint32_t&& idx = 1)
     {
         if (parent == nullptr)
             return;
 
-        // Collect and sort children by name
         std::vector<EntryNode<RPF7Entry>*> sortedChildren;
         EntryNode<RPF7Entry>* currentChild = parent->m_FirstChild;
         while (currentChild != nullptr)
@@ -681,19 +631,16 @@ std::vector<RPF7Entry> RPF7Archive::BuildEntriesListFromNodeTree()
             sortedChildren.push_back(currentChild);
             currentChild = currentChild->m_NextSibling;
         }
-        
-        std::sort(sortedChildren.begin(), sortedChildren.end(),
-            [](const EntryNode<RPF7Entry>* a, const EntryNode<RPF7Entry>* b) {
-                return a->m_Name < b->m_Name;
-            });
 
         // Build entries for sorted children
+        std::sort(sortedChildren.begin(), sortedChildren.end(), [](const EntryNode<RPF7Entry>* a, const EntryNode<RPF7Entry>* b) { return a->m_Name < b->m_Name; });
+
         for (auto* child : sortedChildren)
         {
             RPF7Entry* newEntry = &entryList.emplace_back();
             child->m_Entry = newEntry;
 
-            bool isFile = child->m_Name. find(".") != std::string::npos;
+            bool isFile = child->m_Name.find(".") != std::string::npos;
             *newEntry = isFile ? CreateFileEntry(child->m_FilePath) : CreateDirectoryEntry();
             newEntry->m_NameOffset = GetEntryNameOffset(child->m_Name);
 
@@ -701,7 +648,6 @@ std::vector<RPF7Entry> RPF7Archive::BuildEntriesListFromNodeTree()
                 m_EntryMap[child->m_RelativePath.string()] = newEntry;
         }
 
-        // Process directory indices
         idx += sortedChildren.size();
         for (auto* child : sortedChildren)
         {
@@ -714,11 +660,10 @@ std::vector<RPF7Entry> RPF7Archive::BuildEntriesListFromNodeTree()
         }
     };
 
-    // Root entry
-    RPF7Entry* rootEntry = &entryList. emplace_back();
+    RPF7Entry* rootEntry = &entryList.emplace_back();
     *rootEntry = CreateDirectoryEntry();
     rootEntry->m_DirectoryEntry.m_EntriesIndex = 1;
-    rootEntry->m_DirectoryEntry. m_EntriesCount = m_RootNode.GetChildrenCount();
+    rootEntry->m_DirectoryEntry.m_EntriesCount = m_RootNode.GetChildrenCount();
 
     recursiveBuild(&m_RootNode, 1);
 
@@ -739,15 +684,12 @@ std::map<uint32_t, std::string> RPF7Archive::BuildEntriesNameMap()
             sortedChildren.push_back(currentChild);
             currentChild = currentChild->m_NextSibling;
         }
-        
-        std::sort(sortedChildren.begin(), sortedChildren.end(), 
-            [](const EntryNode<RPF7Entry>* a, const EntryNode<RPF7Entry>* b) {
-                return a->m_Name < b->m_Name;
-            });
+
+        std::sort(sortedChildren.begin(), sortedChildren.end(), [](const EntryNode<RPF7Entry>* a, const EntryNode<RPF7Entry>* b) { return a->m_Name < b->m_Name; });
 
         for (auto* child : sortedChildren)
         {
-            if (! entryNameMap.contains(child->m_Name))
+            if (!entryNameMap.contains(child->m_Name))
                 entryNameMap[child->m_Name] = 0;
 
             if (child->m_FirstChild != nullptr)
@@ -758,14 +700,26 @@ std::map<uint32_t, std::string> RPF7Archive::BuildEntriesNameMap()
     };
     recursiveBuild(&m_RootNode);
 
-    uint32_t idx = 0;
+    uint32_t nameMask = (1 << m_NameShift) - 1;
+    uint32_t byteOffset = 0;
     std::map<uint32_t, std::string> reverseEntryNameMap;
-    
+
     for (auto& entry : entryNameMap)
     {
-        entry.second = idx;
-        reverseEntryNameMap[idx] = entry.first;
-        idx += entry.first.size() + 1;
+        uint32_t shiftedOffset = byteOffset >> m_NameShift;
+
+        uint32_t nameLen = entry.first.size() + 1;
+        uint32_t alignedLen = (nameLen + nameMask) & ~nameMask;
+
+        if (byteOffset + alignedLen > m_NameHeapMaxSize)
+        {
+            throw std::runtime_error("RPF7Archive::BuildEntriesNameMap: Name heap size exceeded maximum limit.");
+        }
+
+        entry.second = shiftedOffset;
+        reverseEntryNameMap[shiftedOffset] = entry.first;
+
+        byteOffset += alignedLen;
     }
 
     return reverseEntryNameMap;
@@ -779,9 +733,9 @@ RPF7Archive::EntryDataBuffer RPF7Archive::CompressData(uint8_t* data, uint64_t d
     defstream.zalloc = Z_NULL;
     defstream.zfree = Z_NULL;
     defstream.opaque = Z_NULL;
-    defstream.next_in = (Bytef *)data;
+    defstream.next_in = (Bytef*)data;
     defstream.avail_in = (uInt)dataLength;
-    defstream.next_out = (Bytef *)deflateBuffer.data();
+    defstream.next_out = (Bytef*)deflateBuffer.data();
     defstream.avail_out = (uInt)deflateBuffer.size();
 
     deflateInit2(&defstream, Z_BEST_COMPRESSION, Z_DEFLATED, -15, MAX_MEM_LEVEL, Z_DEFAULT_STRATEGY);
@@ -802,9 +756,9 @@ RPF7Archive::EntryDataBuffer RPF7Archive::DecompressData(uint8_t* data, uint64_t
     defstream.zalloc = Z_NULL;
     defstream.zfree = Z_NULL;
     defstream.opaque = Z_NULL;
-    defstream.next_in = (Bytef *)data;
+    defstream.next_in = (Bytef*)data;
     defstream.avail_in = (uInt)dataLength;
-    defstream.next_out = (Bytef *)inflateBuffer.data();
+    defstream.next_out = (Bytef*)inflateBuffer.data();
     defstream.avail_out = (uInt)inflateBuffer.size();
 
     inflateInit2(&defstream, -15);
@@ -821,35 +775,6 @@ RPF7Archive::EntryDataBuffer RPF7Archive::DecompressData(uint8_t* data, uint64_t
     inflateEnd(&defstream);
 
     return fullInflatedBuffer;
-
-    // z_stream zs;
-    // memset(&zs, 0, sizeof(zs));
-    //
-    // inflateInit2(&zs, -15); //https://github.com/citizenfx/fivem/blob/1c490ee35560b652c97a4bfd5a5852cb9f033284/code/components/vfs-core/src/VFSRagePackfile7.cpp#L279
-    // zs.next_in = (Bytef*)data;
-    // zs.avail_in = dataLength;
-    //
-    // constexpr uint64_t CHUNK_SIZE = 8192;
-    //
-    // int32_t ret;
-    // EntryDataBuffer buffer(CHUNK_SIZE);
-    // std::vector<uint8_t> tmpBuffer;
-    // tmpBuffer.reserve(CHUNK_SIZE);
-    // uint64_t previousOutputByteCount = 0;
-    //
-    // do
-    // {
-    //     zs.next_out = reinterpret_cast<Bytef*>(buffer.data());
-    //     zs.avail_out = CHUNK_SIZE;
-    //
-    //     ret = inflate(&zs, 0);
-    //     tmpBuffer.insert(tmpBuffer.end(), buffer.data(), buffer.data() + (zs.total_out - previousOutputByteCount));
-    //     previousOutputByteCount = zs.total_out;
-    //
-    // } while (ret == Z_OK);
-    //
-    // inflateEnd(&zs);
-    // return tmpBuffer;
 }
 
 std::filesystem::path RPF7Archive::CorrectEntryPath(const std::filesystem::path& entryPath)
