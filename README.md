@@ -1,51 +1,77 @@
-### Example usage
-Small example for reading from an RPF file:
-```c++
-auto archive = rpflib::RPF7Archive::OpenArchive("./t3rm_hurricane.rpf");
-std::filesystem::path outputPath = std::filesystem::current_path() / "test_hurricane_output"; //output path where we want to extract entry files
+# rpflib by YAMP
 
-//iterating through the entries as a relative path
+**rpflib** is a lightweight C++ library for reading and writing **RPF7 (Rockstar Package File)** archives.
+It provides a simple, filesystem-oriented API for extracting archive contents and building new RPF7 files.
+
+This project and research were developed as part of Yet Another M* Platform, an alternative GTA V multiplayer client.
+
+---
+
+## Basic Usage
+
+### Reading an RPF Archive
+
+This example opens an existing RPF file, iterates over all entries, and extracts them while preserving their internal directory structure.
+
+```cpp
+#include <filesystem>
+#include <cstdio>
+#include <rpflib/RPF7Archive.h>
+
+auto archive = rpflib::RPF7Archive::OpenArchive("./example.rpf");
+
+std::filesystem::path outputPath =
+    std::filesystem::current_path() / "example_output";
+
+// Iterate through all archive entries
 for (auto& path : archive->GetEntryList())
 {
-    //remove the first slash at the beginning
     std::string relativePath = path.substr(1, path.size());
-    
-    //setup the output path
-    std::filesystem::path fullOutputPath = (outputPath / relativePath);
-    
-    //extract entry file as a relative path to the actual full output path
-    printf("Create: %d\n", archive->SaveEntryToPath(path, fullOutputPath));
+
+    std::filesystem::path fullOutputPath = outputPath / relativePath;
+
+    // Extract entry
+    printf("Create: %d\n",
+           archive->SaveEntryToPath(path, fullOutputPath));
 }
 
-//close the archive when we are done
+// Always close the archive when finished
 archive->CloseArchive();
 ```
 
-Small example for writing an RPF archive:
-```c++
-auto archiveWrite = rpflib::RPF7Archive::CreateArchive("./t3rm_hurricane_test.rpf");
+---
 
-//looping through the path recursively
-//(we will just use the example path where we extracted all the entries in the reading example)
-std::filesystem::path outputPath = std::filesystem::current_path() / "test_hurricane_output";
-for (auto& entry : std::filesystem::recursive_directory_iterator(outputPath))
+### Writing an RPF Archive
+
+This example creates a new RPF archive from a directory structure (for example, files previously extracted from another archive).
+
+```cpp
+#include <filesystem>
+#include <rpflib/RPF7Archive.h>
+
+auto archiveWrite =
+    rpflib::RPF7Archive::CreateArchive("./example.rpf");
+
+std::filesystem::path inputPath =
+    std::filesystem::current_path() / "example_input";
+
+for (auto& entry :
+     std::filesystem::recursive_directory_iterator(inputPath))
 {
-    //check if given entry is indeed a file
     if (!std::filesystem::is_regular_file(entry))
         continue;
 
-    //make a relative path that we can use for the archive
-    std::filesystem::path relativePath = std::filesystem::relative(entry, outputPath);
-    
-    //correcting backslashes to forward slashes
-    relativePath = rpflib::RPF7Archive::CorrectEntryPath(relativePath);
-    
-    //add a new entry based on it's relative path and file path
+    std::filesystem::path relativePath =
+        std::filesystem::relative(entry, inputPath);
+
+    // Convert path separators to forward slashes
+    relativePath =
+        rpflib::RPF7Archive::CorrectEntryPath(relativePath);
+
+    // Add file to archive
     archiveWrite->AddEntry(relativePath, entry);
 }
 
-// closing the file is necessary
-// as it will build the RPF file
-// and write all the entry data into the archive
+// Closing finalizes and writes the archive
 archiveWrite->CloseArchive();
 ```
